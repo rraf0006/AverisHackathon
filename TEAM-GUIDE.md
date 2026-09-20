@@ -14,7 +14,7 @@ A shipping team gets up to 2,000 emails a day. ShipCheck:
 3. **Compares** the draft Bill of Lading against the Shipping Instruction
 4. **Asks a person** when it isn't sure, with the reason and the evidence
 
-**It already works:** 100% on the organisers' scorer, 46/46 mistakes caught, 0 false alarms, 98 automated tests passing.
+**It already works:** 100% on the organisers' scorer, 46/46 mistakes caught, 0 false alarms, 100 automated tests passing.
 Our job now: **polish, deploy, make slides, record the video.**
 
 ---
@@ -159,7 +159,7 @@ src/app/api.py        Web API + serves the dashboard
 src/app/store.py      Saves reviews: local file or Supabase
 src/static/           Dashboard (index.html, app.js, style.css)
 scripts/              setup.sh/.ps1, start.sh/.ps1, run_batch.py, score.py, check_supabase.py
-tests/                98 tests: run with  python -m pytest -q
+tests/                100 tests: run with  python -m pytest -q
 data/                 The organisers' 520 emails + attachments + results.json
 docs/                 Brief, rules, decisions, DEPLOY.md
 ```

@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import APP_NAME, ROOT, load_env
+from .config import APP_NAME, ROOT, env, load_env
 
 load_env()
 
@@ -34,8 +34,8 @@ DATA = ROOT / "data"
 STATIC = ROOT / "src" / "static"
 # Serverless hosts have a read-only filesystem apart from /tmp. Vercel sets $VERCEL,
 # so we pick a writable default there no matter which entry point it imports.
-ON_SERVERLESS = bool(os.environ.get("VERCEL"))
-UPLOADS = Path(os.environ.get("UPLOADS_DIR")
+ON_SERVERLESS = bool(env("VERCEL"))
+UPLOADS = Path(env("UPLOADS_DIR")
                 or ("/tmp/shipcheck-uploads" if ON_SERVERLESS else DATA / "uploads"))
 
 app = FastAPI(title=f"{APP_NAME} API")

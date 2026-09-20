@@ -15,7 +15,7 @@ from pathlib import Path
 
 import requests
 
-from .config import ROOT
+from .config import ROOT, env
 
 DATA = ROOT / "data"
 _lock = threading.Lock()
@@ -89,7 +89,7 @@ class SupabaseStore:
 
 
 def get_store():
-    url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
+    url, key = env("SUPABASE_URL"), env("SUPABASE_KEY")
     if url and key:
         return SupabaseStore(url, key)
     return LocalStore()

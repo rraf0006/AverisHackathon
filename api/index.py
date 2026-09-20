@@ -4,6 +4,10 @@ Vercel's filesystem is read-only apart from /tmp, so anything the app writes at
 runtime is redirected there. Reviews and live-upload results are persisted to
 Supabase instead (SUPABASE_URL / SUPABASE_KEY), which is what makes them survive
 between invocations — /tmp does not.
+
+`app` must be assigned at the top level: Vercel's Python builder looks for it by
+reading the file, not by importing it, so an `app` defined inside a try/except
+is invisible to it and the build fails with "Could not find a top-level app".
 """
 import os
 import sys
@@ -16,41 +20,50 @@ os.environ.setdefault("VERCEL", "1")          # app.api / app.llm then default t
 os.environ.setdefault("UPLOADS_DIR", "/tmp/shipcheck-uploads")
 os.environ.setdefault("LLM_CACHE_DIR", "/tmp/shipcheck-llm-cache")
 
-try:
-    from app.api import app  # noqa: E402  (ASGI app Vercel serves)
-except Exception:
-    # If the app cannot even be imported, Vercel reports only
-    # FUNCTION_INVOCATION_FAILED, which says nothing about why. Serve the real
-    # traceback instead, plus what is actually in the bundle — that is almost
-    # always the answer (a folder that was not uploaded, or a dependency that
-    # did not install). Contains no secrets: env var names only, never values.
-    import traceback
 
-    _tb = traceback.format_exc()
+def _inventory() -> str:
+    """What actually made it into the deploy bundle. Names only, never values."""
+    lines = [f"cwd: {Path.cwd()}", f"ROOT: {ROOT}", f"sys.path[0]: {sys.path[0]}", ""]
+    for rel in (".", "src", "src/app", "src/static", "data", "api"):
+        try:
+            names = sorted(p.name for p in (ROOT / rel).iterdir())[:25]
+            lines.append(f"{rel}/  ->  {', '.join(names) or '(empty)'}")
+        except Exception as exc:
+            lines.append(f"{rel}/  ->  MISSING ({type(exc).__name__})")
+    lines.append("")
+    lines.append("env vars set (names only): " + ", ".join(sorted(
+        k for k in os.environ
+        if k in {"VERCEL", "LLM_PROVIDER", "APP_NAME", "DEEPSEEK_API_KEY",
+                 "GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY"})))
+    return "\n".join(lines)
 
-    def _inventory() -> str:
-        lines = [f"cwd: {Path.cwd()}", f"ROOT: {ROOT}", f"sys.path[0]: {sys.path[0]}", ""]
-        for rel in (".", "src", "src/app", "src/static", "data", "api"):
-            d = ROOT / rel
-            try:
-                names = sorted(p.name for p in d.iterdir())[:25]
-                lines.append(f"{rel}/  ->  {', '.join(names) or '(empty)'}")
-            except Exception as exc:
-                lines.append(f"{rel}/  ->  MISSING ({type(exc).__name__})")
-        lines.append("")
-        lines.append("env vars set (names only): " + ", ".join(sorted(
-            k for k in os.environ
-            if k in {"VERCEL", "LLM_PROVIDER", "APP_NAME", "DEEPSEEK_API_KEY",
-                     "GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY"})))
-        return "\n".join(lines)
 
-    _body = ("ShipCheck failed to start.\n\n"
-             "--- traceback ---\n" + _tb +
-             "\n--- what is in the bundle ---\n" + _inventory() + "\n").encode("utf-8")
+def _load_app():
+    """The real app, or a minimal ASGI app that explains why it could not load.
 
-    async def app(scope, receive, send):        # minimal ASGI, no dependencies
-        if scope["type"] != "http":
-            return
-        await send({"type": "http.response.start", "status": 500,
-                    "headers": [(b"content-type", b"text/plain; charset=utf-8")]})
-        await send({"type": "http.response.body", "body": _body})
+    Without this, an import failure reaches the browser as a bare
+    FUNCTION_INVOCATION_FAILED with no traceback anywhere except the CLI logs.
+    """
+    try:
+        from app.api import app as shipcheck
+        return shipcheck
+    except Exception:
+        import traceback
+        body = ("ShipCheck failed to start.\n\n"
+                "--- traceback ---\n" + traceback.format_exc() +
+                "\n--- what is in the bundle ---\n" + _inventory() + "\n").encode("utf-8")
+
+        async def failed(scope, receive, send):     # no dependencies of its own
+            if scope["type"] != "http":
+                return
+            await send({"type": "http.response.start", "status": 500,
+                        "headers": [(b"content-type", b"text/plain; charset=utf-8")]})
+            await send({"type": "http.response.body", "body": body})
+
+        return failed
+
+
+# Top level, so the builder can find it by reading the file. Deliberately NOT
+# also aliased to `handler`: the builder treats `handler` as a
+# BaseHTTPRequestHandler subclass, and would try to drive this ASGI app as one.
+app = _load_app()

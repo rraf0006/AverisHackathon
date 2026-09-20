@@ -27,10 +27,15 @@ from pathlib import Path
 
 import requests
 
-_default_cache = ("/tmp/shipcheck-llm-cache" if os.environ.get("VERCEL")
+from .config import env
+
+_default_cache = ("/tmp/shipcheck-llm-cache" if env("VERCEL")
                   else Path(__file__).resolve().parents[2] / "data" / "llm_cache")
-CACHE_DIR = Path(os.environ.get("LLM_CACHE_DIR") or _default_cache)
-MIN_INTERVAL = float(os.environ.get("LLM_MIN_INTERVAL", "0.5"))  # set ~4 for free tiers (≈10–15 req/min)
+CACHE_DIR = Path(env("LLM_CACHE_DIR") or _default_cache)
+try:                                       # set ~4 for free tiers (≈10–15 req/min)
+    MIN_INTERVAL = float(env("LLM_MIN_INTERVAL", "0.5"))
+except ValueError:                             # a typo here must not kill the app
+    MIN_INTERVAL = 0.5
 _lock = threading.Lock()
 _last_call = 0.0
 last_error: str | None = None
@@ -40,19 +45,19 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
 def provider() -> str | None:
-    p = os.environ.get("LLM_PROVIDER", "").strip().lower()
-    if p == "deepseek" and os.environ.get("DEEPSEEK_API_KEY"):
+    p = (env("LLM_PROVIDER") or "").lower()
+    if p == "deepseek" and env("DEEPSEEK_API_KEY"):
         return "deepseek"
-    if not p and os.environ.get("DEEPSEEK_API_KEY"):
+    if not p and env("DEEPSEEK_API_KEY"):
         return "deepseek"
-    if p == "gemini" and os.environ.get("GEMINI_API_KEY"):
+    if p == "gemini" and env("GEMINI_API_KEY"):
         return "gemini"
-    if p == "openai_compat" and os.environ.get("LLM_BASE_URL"):
+    if p == "openai_compat" and env("LLM_BASE_URL"):
         return "openai_compat"
     # Asked-for provider has no key? Use whichever key we do have.
-    if os.environ.get("DEEPSEEK_API_KEY"):
+    if env("DEEPSEEK_API_KEY"):
         return "deepseek"
-    if os.environ.get("GEMINI_API_KEY"):
+    if env("GEMINI_API_KEY"):
         return "gemini"
     return None
 
@@ -63,21 +68,26 @@ def available() -> bool:
 
 def can_read_pdf() -> bool:
     """Scanned PDFs need a vision model: Gemini, used whenever its key is set."""
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    return bool(env("GEMINI_API_KEY"))
+
+
+def deepseek_model_ok() -> str:
+    """The DeepSeek model name actually sent on the wire (never blank)."""
+    return env("DEEPSEEK_MODEL", "deepseek-flash")
 
 
 def gemini_model() -> str:
     # Google retires older Gemini names for new keys (2.5-flash now 404s), and the
     # "-latest" alias is the first to return 503 under load. Pin a real model.
-    return os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+    return env("GEMINI_MODEL", "gemini-3.6-flash")
 
 
 def model_name() -> str:
     if provider() == "deepseek":
-        return os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+        return env("DEEPSEEK_MODEL", "deepseek-flash")
     if provider() == "gemini":
         return gemini_model()
-    return os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+    return env("LLM_MODEL", "llama-3.3-70b-versatile")
 
 
 # ------------------------------------------------------------------ plumbing
@@ -131,7 +141,7 @@ def _call_openai_compat(prompt: str) -> str:
     if provider() == "deepseek":
         base, key = DEEPSEEK_BASE_URL, os.environ["DEEPSEEK_API_KEY"]
     else:
-        base, key = os.environ["LLM_BASE_URL"].rstrip("/"), os.environ.get("LLM_API_KEY")
+        base, key = env("LLM_BASE_URL", "").rstrip("/"), env("LLM_API_KEY")
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"

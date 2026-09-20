@@ -80,7 +80,7 @@ Email ─► ① Sort ──────────────► not a BL che
 | Dashboard | Plain HTML/CSS/JS served by FastAPI (no build step) |
 | AI | **DeepSeek API** (`deepseek-chat`) when rules aren't sure · **Gemini free tier** reads scanned PDFs · both optional, set in `.env` |
 | Cloud | **Vercel** (FastAPI, deploys from GitHub) + **Supabase** free Postgres for reviews and uploads, all free tiers |
-| Tests | pytest (98 tests) |
+| Tests | pytest (100 tests) |
 
 ---
 
@@ -178,7 +178,7 @@ Activate the environment by hand if you prefer: `source .venv/bin/activate`
 ├── vercel.json        routes every path to the function, bundles data/ + src/
 ├── Dockerfile         backup host (Render / any container host)
 ├── scripts/           setup + start (.sh and .ps1), run_batch.py, score.py, check_supabase.py
-├── tests/             98 tests on unseen wording, layouts and languages (incl. tests/test_stress.py)
+├── tests/             100 tests on unseen wording, layouts and languages (incl. tests/test_stress.py)
 ├── data/              organisers' synthetic dataset + results.json
 └── docs/              brief, rules, decisions, deploy guide, UI brief
 ```

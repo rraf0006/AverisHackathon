@@ -264,3 +264,32 @@ def test_container_counts_written_in_words_are_not_invented(monkeypatch):
     assert parse_container_count("THREE (3) CONTAINERS") in (None, 3)
     assert parse_container_count("2 x 40'HC + 1 x 20'GP") == 3
     assert parse_container_count("2X40'HC") == 2
+
+
+# ─────────── 5. a host that sets variables but leaves them empty ──────────────
+
+def test_blank_environment_variables_are_treated_as_unset(monkeypatch):
+    """Vercel creates env vars from .env.example with empty values. os.environ.get
+    then returns "" rather than the default, because the key exists — which turned
+    float(LLM_MIN_INTERVAL) into a ValueError at import and took the whole app
+    down with no route left to report it."""
+    import importlib
+    for name in ("LLM_MIN_INTERVAL", "APP_NAME", "LLM_PROVIDER", "DEEPSEEK_API_KEY",
+                 "DEEPSEEK_MODEL", "GEMINI_API_KEY", "GEMINI_MODEL", "LLM_CACHE_DIR"):
+        monkeypatch.setenv(name, "")
+
+    from app import config
+    importlib.reload(config)
+    mod = importlib.reload(llm)
+
+    assert mod.MIN_INTERVAL == 0.5                    # the crash, before
+    assert config.APP_NAME == "ShipCheck"
+    assert mod.gemini_model() and mod.deepseek_model_ok()
+    assert mod.provider() is None and mod.available() is False   # blank key = no key
+    importlib.reload(config)
+
+
+def test_a_malformed_number_does_not_kill_the_app(monkeypatch):
+    import importlib
+    monkeypatch.setenv("LLM_MIN_INTERVAL", "four")
+    assert importlib.reload(llm).MIN_INTERVAL == 0.5
