@@ -86,6 +86,28 @@ Email ─► ① Sort ──────────────► not a BL che
 
 ## 🚀 Run it locally
 
+### Windows PowerShell
+
+After creating `.venv` and installing dependencies, start the dashboard from the project folder:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m uvicorn app.api:app --app-dir src --port 8000 --reload
+```
+
+Open http://localhost:8000. Press Ctrl+C in the terminal to stop the server.
+This command does not require activating the environment or changing PowerShell's execution policy.
+
+For a fresh checkout with Python 3.10+ installed:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -X utf8 scripts/run_batch.py --no-llm
+.\.venv\Scripts\python.exe -X utf8 -m pytest -q
+```
+
+### macOS / Linux / Git Bash
+
 ```bash
 git clone https://github.com/Emmapoky/AverisHackathon.git
 cd AverisHackathon
