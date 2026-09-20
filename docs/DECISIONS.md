@@ -12,9 +12,9 @@
 > | D8 | Claude API (paid) | **Google Gemini free tier** (AI Studio key, no card), or Groq / Ollama | Must be free. Gemini also reads scanned PDFs. The app still works with **no key** (rules only) |
 > | D8 (again) | Gemini free tier | **DeepSeek API (`deepseek-chat`)** | The team bought DeepSeek credit ($1.99 covers thousands of calls; 12 test calls < $0.01). No tight rate limit, so a live demo can't stall the way free tiers can. Only gap: it can't read scanned PDFs, so those go to a person (what the organisers expect anyway). Gemini/Groq stay as free backups in `.env` |
 > | D10 | FastAPI + Next.js | **FastAPI + plain HTML/JS dashboard** (no build step) | Built and working now; one container, nothing to learn |
-> | D11 | Cloud Run + Vercel + Supabase | **Hugging Face Spaces (Docker) + Supabase free** | Cloud Run needs a card; HF Spaces is free, no card, and doesn't sleep like Render |
+> | D11 | Cloud Run + Vercel + Supabase | **Vercel (FastAPI) + Supabase free** | Cloud Run needs a card. We tried Hugging Face Spaces, but it now requires a paid Pro subscription to run a Space. Vercel's Hobby tier is free and redeploys from GitHub on every push |
 >
-> **Status:** working prototype in the repo. **100%** on the organisers' scorer, 35 tests pass. See the repo README and `docs/DEPLOY.md`.
+> **Status:** working prototype in the repo. **100%** on the organisers' scorer, 62 tests pass. See the repo README and `docs/DEPLOY.md`.
 
 ---
 
@@ -32,7 +32,7 @@
 | D8 | AI model | **Claude API (Opus 5)** with results cached |
 | D9 | Interface | **Web dashboard**: Inbox → Triage → Review Queue |
 | D10 | Tech stack | **Python FastAPI backend + Next.js frontend** |
-| D11 | Cloud | **Google Cloud Run (API) + Vercel (UI) + Supabase (DB and file storage)** |
+| D11 | Cloud | **Vercel (one FastAPI function: API + dashboard) + Supabase (reviews, uploaded results)** |
 | D12 | Roles | 5 lanes (below). Assign names by skill tonight |
 | D13 | Scope | Must / Should / Could list (below) |
 
@@ -238,6 +238,21 @@ Plus a small **Stats** panel: category counts, % auto-decided, self-score accura
 
 > ⚠️ **Deploy a "hello world" on Saturday**, not Sunday night. The live link must stay up for the whole judging period.
 
+**🔄 What we actually shipped (Sun 20 Sep):** one **Vercel** function serving both the API
+and the dashboard, plus **Supabase** for reviews and uploaded-email results. No Cloud Run
+(needs a card), no separate Next.js front end (D10 dropped it).
+
+We deployed to **Hugging Face Spaces** first and wrote `scripts/deploy_hf.py` for it, but
+HF now gates running a Space behind a paid **Pro** subscription, which breaks the
+free-only rule we set in D8. Moved to Vercel and deleted the HF script. The `Dockerfile`
+stays so **Render** remains a same-day backup if Vercel misbehaves during judging.
+
+**The Vercel trade-off to know for Q&A:** Vercel is serverless, so the filesystem is
+read-only apart from `/tmp` and instances are discarded between requests. That is exactly
+why Supabase is load-bearing here rather than a nice-to-have — without it, a reviewer's
+decision would vanish on the next click. `api/index.py` redirects the upload folder and
+the LLM cache to `/tmp`.
+
 ---
 
 ## D12. Roles (5 people, 5 lanes)
@@ -283,4 +298,10 @@ Team: Erwyna · Nandhini · Charvhi · Riely · Taabish
 
 | # | Changed decision | New choice | Why | Date |
 |---|---|---|---|---|
-| | | | | |
+| D8 | Claude API (paid) → Gemini free tier | **DeepSeek (`deepseek-chat`)** for text, **Gemini** for scanned PDFs | Team bought DeepSeek credit; no tight rate limit, so a live demo can't stall. Gemini's vision covers the scans DeepSeek can't read | Sat 19 Sep |
+| D10 | FastAPI + Next.js | **FastAPI + plain HTML/CSS/JS** | No build step, one deployable, nothing new for the team to learn | Sat 19 Sep |
+| D11 | Cloud Run + Vercel + Supabase | **Hugging Face Spaces (Docker) + Supabase** | Cloud Run asks for a card even on the free tier | Sat 19 Sep |
+| D11 | Hugging Face Spaces | **Vercel (FastAPI preset) + Supabase** | HF now requires a paid **Pro** subscription to run a Space — breaks our free-only rule. Vercel Hobby is free and redeploys from GitHub on push | Sun 20 Sep |
+| D8 | AI only fills gaps the rules missed | **+ an AI second opinion on every mismatch** (`--second-opinion`, advisory) | On the organisers' data the rules decide 520/520, so the AI was invisible and a confidently wrong rule was never questioned. The second opinion is recorded and shown, but never edits the answer — four tests assert the submitted JSON is byte-identical with it on or off | Sun 20 Sep |
+| D3 | One pipeline | **`--mode rules` (default) / `--mode agents`**, scored separately | An AI-first pipeline is worth measuring, not assuming. `--mode agents` writes `submission-agents.json`, so a mode still being tested can never overwrite the run that scored 1.000 | Sun 20 Sep |
+| D9 | Averis-inspired cream/serif dashboard | **Dark sidebar + orange accent console** | The first pass looked like a copy of the client's own site — unoriginal, and the floating sticky header visibly bounced on scroll. Rebuilt as a fixed dark rail with a flat, static top bar | Sun 20 Sep |

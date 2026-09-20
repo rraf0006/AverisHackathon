@@ -83,6 +83,21 @@ def _fill_with_llm(doc: ParsedDoc, fields: dict, trace: Trace, role: str):
     trace.add("Extract fields (AI)", "ok", f"{role}: AI found {', '.join(got) or 'nothing new'} for labels the rules didn't recognise", t0)
 
 
+# Weights can arrive in different units, and converting pounds to kilograms does
+# not land on a round number, so exact equality would report a defect on two
+# documents that say the same thing. The smallest genuine weight defect in the
+# organisers' data is 0.233% (500 kg on 214,270), and no matching pair differs
+# numerically at all — so 0.01% absorbs conversion rounding with a 20x margin
+# below anything real.
+WEIGHT_TOLERANCE = 1e-4
+
+
+def _same_value(field: str, a, b) -> bool:
+    if field == "gross_weight_kg" and isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b or abs(a - b) <= WEIGHT_TOLERANCE * max(abs(a), abs(b))
+    return a == b
+
+
 def compare_fields(si: dict, bl: dict) -> list[dict]:
     rows = []
     for f in FIELDS:
@@ -102,22 +117,23 @@ def compare_fields(si: dict, bl: dict) -> list[dict]:
             if ns is None or nb is None:
                 row["note"] = "Could not read the value"
             else:
-                row["match"] = ns == nb
+                row["match"] = _same_value(f, ns, nb)
                 if row["match"] and display_value(f, s_val).upper() != display_value(f, b_val).upper():
                     row["note"] = "Same value, different formatting"
         rows.append(row)
     return rows
 
 
-def process_email(email: dict, read_bytes: Callable[[str], bytes], use_llm: bool = True) -> dict:
+def process_email(email: dict, read_bytes: Callable[[str], bytes], use_llm: bool = True,
+                  second_opinion: bool = False) -> dict:
     trace = Trace()
     res = {"email_id": email["email_id"], "from": email.get("from"), "subject": email.get("subject"),
            "body": email.get("body", ""), "attachments": email.get("attachments", []),
-           "status": "NOT_CHECKED", "review_reason": None, "review_detail": None,
+           "status": "NOT_CHECKED", "review_reason": None, "review_detail": None, "ai_used": [],
            "defect_fields": [], "has_defect": False, "comparison": [], "documents": [],
            "error": None}
     try:
-        _run(email, read_bytes, use_llm, trace, res)
+        _run(email, read_bytes, use_llm, trace, res, second_opinion)
     except Exception as exc:  # never let one email kill the batch
         res["status"], res["review_reason"] = "NEEDS_REVIEW", "processing_error"
         res["review_detail"] = f"Processing failed ({type(exc).__name__}: {exc}). Retry or check by hand."
@@ -128,7 +144,7 @@ def process_email(email: dict, read_bytes: Callable[[str], bytes], use_llm: bool
     return res
 
 
-def _run(email, read_bytes, use_llm, trace, res):
+def _run(email, read_bytes, use_llm, trace, res, second_opinion=False):
     # ① Triage
     t0 = time.time()
     c = classify(email, use_llm=use_llm)
@@ -136,6 +152,8 @@ def _run(email, read_bytes, use_llm, trace, res):
                class_reason=c["reason"], class_scores=c["scores"])
     trace.add("Triage", "ok" if c["decided_by"] != "rule_low_confidence" else "warn",
               f"{c['category']} — {c['reason']}", t0)
+    if c["decided_by"] == "llm":
+        res["ai_used"].append("sorted this email (the keyword rules weren't confident)")
     if c["category"] != "BL_COMPARISON":
         return
 
@@ -188,6 +206,13 @@ def _run(email, read_bytes, use_llm, trace, res):
         _fill_with_llm(si[0], si[1], trace, "Shipping Instruction")
         _fill_with_llm(bl[0], bl[1], trace, "draft Bill of Lading")
 
+    for d in docs:
+        if d[2]["ai_read"]:
+            res["ai_used"].append(f"read {d[0].path.split('/')[-1]} visually — it is a scan with no text")
+    n_ai_fields = sum(1 for side in (si[1], bl[1]) for v in side.values() if v.get("source") == "ai")
+    if n_ai_fields:
+        res["ai_used"].append(f"filled {n_ai_fields} field(s) the rules' label list didn't recognise")
+
     # ⑤ Verify — deterministic comparison
     t0 = time.time()
     rows = compare_fields(si[1], bl[1])
@@ -209,6 +234,18 @@ def _run(email, read_bytes, use_llm, trace, res):
         trace.add("Escalate", "warn", res["review_detail"], time.time())
     elif mism:
         res.update(status="MISMATCH", has_defect=True)
+        # A second pair of eyes on the cases we would actually send back to a customer.
+        # Advisory only: it is recorded and shown, and it never edits status/category/
+        # comparison, so the submitted answer is identical whether or not it runs.
+        if second_opinion and use_llm and llm.available():
+            t0 = time.time()
+            op = llm.second_opinion(si[0].text or "", bl[0].text or "", [r for r in rows if r["match"] is False])
+            if op:
+                res["second_opinion"] = op
+                res["ai_used"].append("double-checked the mismatch as a second reviewer")
+                trace.add("Second opinion (AI)", "ok" if op["agrees"] else "warn",
+                          ("AI agrees these fields really don't match" if op["agrees"]
+                           else "AI disagrees with the rules — worth a human look") + f": {op['note']}", t0)
     else:
         res["status"] = "OK"
 

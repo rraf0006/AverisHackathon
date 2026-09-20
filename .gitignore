@@ -36,3 +36,9 @@ data/reviews.json
 data/processed_extra.json
 data/uploads/
 .claude/
+
+# stray nested clone (contains its own .env — never commit)
+AverisHackathon/
+
+# LLM response cache (regenerated on demand)
+data/llm_cache/

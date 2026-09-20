@@ -17,7 +17,7 @@ const REASON = {
 };
 const BY = { rule: "sorted by rules", llm: "sorted by AI", rule_low_confidence: "not sure — please check" };
 
-const state = { cfg: null, rows: [], sel: null, cat: null, status: null, q: "", view: "inbox" };
+const state = { cfg: null, rows: [], sel: null, cat: null, status: null, ai: false, q: "", view: "inbox" };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -27,6 +27,16 @@ async function api(path, opts = {}) {
 const catPill = (c) => (CAT[c] ? `<span class="pill ${CAT[c][1]}">${CAT[c][0]}</span>` : "");
 const statusPill = (s) => (STATUS[s] && STATUS[s][0] ? `<span class="pill ${STATUS[s][1]}">${STATUS[s][0]}</span>` : "");
 
+// stat-card icons (inline so there is no icon-font dependency)
+const _sv = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const ICON = {
+  mail: _sv('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>'),
+  check: _sv('<path d="M20 6 9 17l-5-5"/>'),
+  alert: _sv('<circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/>'),
+  person: _sv('<circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>'),
+  clock: _sv('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+};
+
 // ---------------------------------------------------------------- stats
 async function loadStats() {
   const s = await api("/api/summary");
@@ -34,12 +44,13 @@ async function loadStats() {
   $("#queue-count").textContent = s.open_reviews;
   $("#queue-count").hidden = !s.open_reviews;
   $("#stats").innerHTML = [
-    ["Emails sorted", s.total, ""],
-    ["BL checks done", (ds.OK || 0) + (ds.MISMATCH || 0), ""],
-    ["Mistakes caught", ds.MISMATCH || 0, "bad"],
-    ["Waiting for a person", s.open_reviews, "warn"],
-    ["Staff time saved", "≈" + Math.round(s.minutes_saved / 60) + "h", "ok"],
-  ].map(([l, n, c]) => `<div class="stat ${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+    ["Emails sorted", s.total, "", ICON.mail],
+    ["BL checks done", (ds.OK || 0) + (ds.MISMATCH || 0), "", ICON.check],
+    ["Mistakes caught", ds.MISMATCH || 0, "bad", ICON.alert],
+    ["Waiting for a person", s.open_reviews, "warn", ICON.person],
+    ["Staff time saved", "≈" + Math.round(s.minutes_saved / 60) + "h", "ok", ICON.clock],
+  ].map(([l, n, c, i]) => `<div class="stat ${c}"><span class="stat-ico">${i}</span>` +
+       `<div><div class="l">${l}</div><div class="n">${n}</div></div></div>`).join("");
   state.summary = s;
 }
 
@@ -48,7 +59,8 @@ function chips() {
   $("#cat-chips").innerHTML = [["All types", null], ...Object.entries(CAT).map(([k, v]) => [v[0], k])]
     .map(([l, v]) => `<button class="chip ${state.cat === v ? "on" : ""}" data-cat="${v ?? ""}">${l}</button>`).join("");
   $("#status-chips").innerHTML = [["Any result", null], ["Doesn't match", "MISMATCH"], ["Needs a person", "NEEDS_REVIEW"], ["Matches", "OK"], ["Waiting for BL", "WAITING_FOR_BL"]]
-    .map(([l, v]) => `<button class="chip ${state.status === v ? "on" : ""}" data-status="${v ?? ""}">${l}</button>`).join("");
+    .map(([l, v]) => `<button class="chip ${state.status === v ? "on" : ""}" data-status="${v ?? ""}">${l}</button>`).join("")
+    + `<button class="chip chip-ai ${state.ai ? "on" : ""}" data-ai="1" title="Only the emails where the AI did something the rules couldn't">✦ AI stepped in</button>`;
 }
 
 async function loadList() {
@@ -56,6 +68,7 @@ async function loadList() {
   if (state.cat) p.set("category", state.cat);
   if (state.status) p.set("status", state.status);
   if (state.q) p.set("q", state.q);
+  if (state.ai) p.set("ai", "true");
   if (state.view === "queue") p.set("queue", "true");
   state.rows = await api("/api/emails?" + p);
   renderList();
@@ -75,6 +88,7 @@ function renderList() {
         ${r.status === "MISMATCH" ? `<span>${r.defect_fields.length} field(s)</span>` : ""}
         ${r.reviewed ? `<span class="pill pill-ok">✔ reviewed</span>` : ""}
         ${r.uploaded ? `<span class="pill pill-info">new</span>` : ""}
+        ${r.ai ? `<span class="pill pill-brand" title="The AI did something here the rules couldn't">✦ AI</span>` : ""}
         <span style="margin-left:auto">${esc(r.email_id)}</span></div>
     </div>`).join("");
 }
@@ -129,6 +143,26 @@ function docsBlock(e) {
     </a>`).join("")}</div>`;
 }
 
+function aiBlock(e) {
+  const used = e.ai_used || [];
+  const op = e.second_opinion;
+  if (!used.length && !op) return "";
+  const list = used.length
+    ? `<ul class="ai-list">${used.map((u) => `<li>${esc(u)}</li>`).join("")}</ul>`
+    : "";
+  const second = op
+    ? `<div class="ai-verdict ${op.agrees ? "agree" : "disagree"}">
+         <b>${op.agrees ? "✓ The AI reviewer agrees with the rules" : "⚠ The AI reviewer disagrees with the rules"}</b>
+         <p>${esc(op.note || "")}</p>
+         <small>Independent second read by ${esc(op.model || "the AI")}. Advisory only — the decision above
+         comes from the deterministic comparison, never from this. A disagreement is a signal for a person,
+         not an automatic override.</small>
+       </div>`
+    : "";
+  return `<h3>Where the AI helped <span class="muted">— everything else was decided by rules</span></h3>
+    <div class="ai-panel">${list}${second}</div>`;
+}
+
 function traceBlock(e) {
   if (!e.trace?.length) return "";
   return `<h3>What the system did</h3><ol class="trace">${e.trace.map((t) =>
@@ -178,6 +212,7 @@ function renderDetail(e) {
     ${comparisonTable(e)}
     ${docsBlock(e)}
     ${reviewBlock(e)}
+    ${aiBlock(e)}
     ${traceBlock(e)}
     <h3>Email</h3><details class="body" ${e.comparison?.length ? "" : "open"}><summary>Show the email text</summary><pre>${esc(e.body)}</pre></details>`;
   const d = $("#detail");
@@ -229,7 +264,9 @@ $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal" || e.
 // ---------------------------------------------------------------- new email
 const EXAMPLES = {
   malay: { sender: "ops@pelanggan.com.my", subject: "Semakan draf BL untuk OC 5RSG-00133",
-    body: "Salam,\n\nDilampirkan SI dan draf BL untuk OC 5RSG-00133. Sila semak draf BL berbanding SI dan maklumkan jika ada percanggahan.\n\nTerima kasih." },
+    body: "Salam,\n\nDilampirkan arahan penghantaran dan draf bil muatan untuk OC 5RSG-00133. Sila semak draf bil muatan dan sahkan bahawa butirannya sepadan dengan arahan penghantaran. Maklumkan jika ada percanggahan.\n\nTerima kasih." },
+  chinese: { sender: "operations@customer.cn", subject: "请审核提单草稿 OC 5RSG-00133",
+    body: "您好，\n\n附件中是装运指示和提单草稿。请比较提单和装运指示，并确认所有信息是否相符。如有差异，请告知。\n\n谢谢。" },
   invoice: { sender: "finance@customer.com", subject: "Question about our last bill",
     body: "Hi team,\n\nWe were charged twice for port handling on invoice 5250071354. Could you check and send a corrected bill?\n\nThanks" },
   spam: { sender: "rewards@lucky-winner.biz", subject: "You are our lucky shipper!", body: "Congratulations! You have won a free container. Claim your prize now at http://free-container.win" },
@@ -303,8 +340,10 @@ async function route() {
   $("#view-how").hidden = state.view !== "how";
   if (state.view === "inbox" || state.view === "queue") {
     await loadList();
-    if (id) openEmail(decodeURIComponent(id));
-    else if (state.rows[0] && !state.sel) openEmail(state.rows[0].email_id);
+    if (id) await openEmail(decodeURIComponent(id));
+    else if (state.rows[0] && !state.rows.some((row) => row.email_id === state.sel)) {
+      await openEmail(state.rows[0].email_id);
+    }
   }
   if (state.view === "how") { await loadStats(); renderHow(); }
 }
@@ -316,9 +355,18 @@ async function init() {
   $("#ai-status").classList.toggle("off", !state.cfg.ai);
   chips();
   $("#cat-chips").addEventListener("click", (e) => { if (!e.target.dataset) return; if ("cat" in e.target.dataset) { state.cat = e.target.dataset.cat || null; chips(); loadList(); } });
-  $("#status-chips").addEventListener("click", (e) => { if ("status" in (e.target.dataset || {})) { state.status = e.target.dataset.status || null; chips(); loadList(); } });
+  $("#status-chips").addEventListener("click", (e) => {
+    const d = e.target.dataset || {};
+    if ("ai" in d) { state.ai = !state.ai; chips(); loadList(); }
+    else if ("status" in d) { state.status = d.status || null; chips(); loadList(); }
+  });
   let t; $("#search").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { state.q = e.target.value.trim(); loadList(); }, 200); });
   $("#list").addEventListener("click", (e) => { const r = e.target.closest(".row"); if (r) { state.userClicked = true; openEmail(r.dataset.id); } });
+  const closeNav = () => { document.body.classList.remove("nav-open"); $("#scrim").hidden = true; };
+  $("#menu-btn").addEventListener("click", () => { document.body.classList.add("nav-open"); $("#scrim").hidden = false; });
+  $("#scrim").addEventListener("click", closeNav);
+  document.querySelectorAll(".sidebar a").forEach((a) => a.addEventListener("click", closeNav));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeNav(); $("#modal").hidden = true; } });
   window.addEventListener("hashchange", route);
   await loadStats();
   await route();

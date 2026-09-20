@@ -1,0 +1,9 @@
+_local/
+.venv/
+tests/
+docs/
+data/llm_cache/
+data/uploads/
+data/__pycache__/
+**/__pycache__/
+*.zip

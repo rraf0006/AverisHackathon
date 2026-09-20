@@ -1,11 +1,11 @@
 """LLM access. Our chosen model is DeepSeek (team account, pay-as-you-go,
 fractions of a cent per call). Picked by env vars:
 
-  LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=...  (DEEPSEEK_MODEL=deepseek-chat)
+  LLM_PROVIDER=deepseek DEEPSEEK_API_KEY=...  (DEEPSEEK_MODEL=deepseek-flash)
                         Text only. If GEMINI_API_KEY is also set, Gemini's free
                         tier reads scanned PDFs (vision) — DeepSeek does the rest.
   LLM_PROVIDER=gemini   GEMINI_API_KEY=...   (Google AI Studio free key, no card)
-                        GEMINI_MODEL=gemini-flash-latest (reads scanned PDFs too)
+                        GEMINI_MODEL=gemini-3.6-flash (reads scanned PDFs too)
   LLM_PROVIDER=openai_compat  LLM_BASE_URL=https://api.groq.com/openai/v1
                         LLM_API_KEY=...  LLM_MODEL=llama-3.3-70b-versatile
                         (Groq free tier, OpenRouter free models, or a local
@@ -27,7 +27,9 @@ from pathlib import Path
 
 import requests
 
-CACHE_DIR = Path(os.environ.get("LLM_CACHE_DIR", Path(__file__).resolve().parents[2] / "data" / "llm_cache"))
+_default_cache = ("/tmp/shipcheck-llm-cache" if os.environ.get("VERCEL")
+                  else Path(__file__).resolve().parents[2] / "data" / "llm_cache")
+CACHE_DIR = Path(os.environ.get("LLM_CACHE_DIR") or _default_cache)
 MIN_INTERVAL = float(os.environ.get("LLM_MIN_INTERVAL", "0.5"))  # set ~4 for free tiers (≈10–15 req/min)
 _lock = threading.Lock()
 _last_call = 0.0
@@ -65,12 +67,14 @@ def can_read_pdf() -> bool:
 
 
 def gemini_model() -> str:
-    return os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+    # Google retires older Gemini names for new keys (2.5-flash now 404s), and the
+    # "-latest" alias is the first to return 503 under load. Pin a real model.
+    return os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 
 def model_name() -> str:
     if provider() == "deepseek":
-        return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
     if provider() == "gemini":
         return gemini_model()
     return os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
@@ -150,7 +154,7 @@ def ask_json(prompt: str, pdf_bytes: bytes | None = None, retries: int = 3) -> d
     key = f"{prov}|{model}|{prompt}|{hashlib.sha256(pdf_bytes or b'').hexdigest()}"
     cp = _cache_path(key)
     if cp.exists():
-        return json.loads(cp.read_text())
+        return json.loads(cp.read_text(encoding="utf-8"))
     for attempt in range(retries):
         _throttle()
         try:
@@ -161,7 +165,7 @@ def ask_json(prompt: str, pdf_bytes: bytes | None = None, retries: int = 3) -> d
             out = _parse_json(text)
             if out is not None:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                cp.write_text(json.dumps(out, ensure_ascii=False))
+                cp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
                 last_error = None
             return out
         except requests.HTTPError as exc:
@@ -235,6 +239,43 @@ Return JSON exactly in this shape:
     if text:
         prompt += f"\n--- DOCUMENT ---\n{text[:8000]}"
     return ask_json(prompt, pdf_bytes=pdf_bytes)
+
+
+def second_opinion(si_text: str, bl_text: str, mismatches: list[dict]) -> dict | None:
+    """Ask the AI to independently check a mismatch the rules already found.
+
+    Advisory only. The answer is shown to the reviewer as a second pair of eyes and
+    never changes the category, the status or the comparison — the rules stay in
+    charge of the decision. It exists because a confidently wrong rule is otherwise
+    never questioned by anything.
+    """
+    rows = "\n".join(
+        f"- {m.get('label') or m.get('field')}: Shipping Instruction says {m.get('si') or '(blank)'!r}, "
+        f"draft Bill of Lading says {m.get('bl') or '(blank)'!r}"
+        for m in mismatches)
+    prompt = f"""You are a second reviewer on a shipping-documentation team. Another system
+compared a Shipping Instruction against a draft Bill of Lading and flagged these fields as
+NOT matching:
+{rows}
+
+Read both documents yourself and say whether you agree these are real differences that a
+customer would need to correct. Treat these as the SAME: different spacing or punctuation,
+"LTD"/"LIMITED", "L.L.C."/"LLC", upper vs lower case, and the same weight written in
+different units. Treat these as DIFFERENT: a different company, a different port, a
+different container count or a genuinely different number.
+
+Return JSON: {{"agrees": true|false, "note": "<one short sentence in plain English>", "confidence": <0..1>}}
+
+--- SHIPPING INSTRUCTION ---
+{si_text[:6000]}
+
+--- DRAFT BILL OF LADING ---
+{bl_text[:6000]}"""
+    out = ask_json(prompt)
+    if not out or "agrees" not in out:
+        return None
+    return {"agrees": bool(out.get("agrees")), "note": str(out.get("note") or "").strip(),
+            "confidence": float(out.get("confidence") or 0.0), "model": model_name()}
 
 
 def draft_correction_email(email: dict, mismatches: list[dict]) -> dict | None:

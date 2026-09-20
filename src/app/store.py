@@ -29,11 +29,11 @@ class LocalStore:
         self.extra_path = DATA / "processed_extra.json"
 
     def _read(self, p: Path) -> dict:
-        return json.loads(p.read_text()) if p.exists() else {}
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
     def _write(self, p: Path, d: dict):
         with _lock:
-            p.write_text(json.dumps(d, indent=1, ensure_ascii=False))
+            p.write_text(json.dumps(d, indent=1, ensure_ascii=False), encoding="utf-8")
 
     def reviews(self) -> dict:
         return self._read(self.reviews_path)
@@ -57,7 +57,11 @@ class SupabaseStore:
 
     def __init__(self, url: str, key: str):
         self.base = url.rstrip("/") + "/rest/v1"
-        self.h = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        self.h = {"apikey": key, "Content-Type": "application/json"}
+        # Legacy keys (service_role) are JWTs and also go in Authorization. New-style
+        # keys (sb_secret_...) are not JWTs and must only be sent as `apikey`.
+        if key.startswith("eyJ"):
+            self.h["Authorization"] = f"Bearer {key}"
 
     def _get(self, table: str) -> dict:
         r = requests.get(f"{self.base}/{table}?select=email_id,data", headers=self.h, timeout=15)

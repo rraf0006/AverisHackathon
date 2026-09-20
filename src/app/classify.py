@@ -30,8 +30,12 @@ RULES: list[tuple[str, str, float]] = [
     ("BL_COMPARISON", r"\b(review|look over|go through|cross.?check)\b[^.]{0,40}\b(b/?l|bill of lading)\b", 2.0),
     ("BL_COMPARISON", r"(lines? up|consistent|agrees?|match(es)?) with (our |the )?(si|shipping instruction)", 2.0),
     ("BL_COMPARISON", r"(核对|检查|对比)[^。]{0,20}提单|提单[^。]{0,20}(核对|一致)", 2.5),
+    ("BL_COMPARISON", r"(确认|审核|比较)[^。]{0,24}(提单|提单草稿)|提单[^。]{0,24}(相符|差异|不一致)", 2.5),
+    ("BL_COMPARISON", r"提单[^。]{0,24}(装运指示|托运指示)|(?:装运指示|托运指示)[^。]{0,24}提单", 2.0),
     # Malay / Indonesian: "semak draf BL", "periksa draft BL"
-    ("BL_COMPARISON", r"(semak|periksa|bandingkan)[^.]{0,40}(b/?l|bill of lading)", 2.0),
+    ("BL_COMPARISON", r"(semak|periksa|bandingkan|sahkan|teliti)[^.]{0,50}(b/?l|bill of lading|bil muatan|konosemen)", 2.0),
+    ("BL_COMPARISON", r"(b/?l|bil muatan|konosemen)[^.]{0,50}(sepadan|selaras|sama|berbanding|percanggahan|perbezaan)[^.]{0,30}(si|arahan penghantaran)", 2.5),
+    ("BL_COMPARISON", r"(si|arahan penghantaran)[^.]{0,30}(dengan|dan|berbanding)[^.]{0,30}(b/?l|bil muatan|konosemen)", 2.0),
     # SI request
     ("SI_REQUEST", r"(please find|attached|herewith)[^.]{0,20}shipping instruction for", 2.5),
     ("SI_REQUEST", r"\b(cust si|request si|si needed|send (the |us )?si|provide (the )?si)\b", 1.5),

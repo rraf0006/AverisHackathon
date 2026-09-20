@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import time
 from collections import Counter
@@ -22,13 +23,17 @@ load_env()
 
 from . import llm  # noqa: E402
 from .fields import FIELD_LABELS, FIELDS  # noqa: E402
-from .inbox import Inbox  # noqa: E402
+from .inbox import Inbox  # noqa: E402  (None if data/loader.py isn't deployed)
 from .pipeline import process_email, to_submission  # noqa: E402
 from .store import get_store  # noqa: E402
 
 DATA = ROOT / "data"
 STATIC = ROOT / "src" / "static"
-UPLOADS = DATA / "uploads"
+# Serverless hosts have a read-only filesystem apart from /tmp. Vercel sets $VERCEL,
+# so we pick a writable default there no matter which entry point it imports.
+ON_SERVERLESS = bool(os.environ.get("VERCEL"))
+UPLOADS = Path(os.environ.get("UPLOADS_DIR")
+                or ("/tmp/shipcheck-uploads" if ON_SERVERLESS else DATA / "uploads"))
 
 app = FastAPI(title=f"{APP_NAME} API")
 
@@ -40,12 +45,22 @@ async def no_cache_static(request, call_next):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
 store = get_store()
-inbox = Inbox(str(DATA))
+
+# Things that must not take the whole app down when a file is missing from a
+# deploy bundle: without these guards a partial upload gives every route an
+# opaque 500 with no way to tell what is absent.
+BOOT_PROBLEMS: list[str] = []
+if Inbox is None:
+    BOOT_PROBLEMS.append("data/loader.py is missing, so the organisers' inbox loader is unavailable")
+if not (DATA / "results.json").exists():
+    BOOT_PROBLEMS.append("data/results.json is missing, so the dashboard has no emails to show")
+if not (STATIC / "index.html").exists():
+    BOOT_PROBLEMS.append("src/static/ is missing, so the dashboard cannot be served")
 
 
 def _load_results() -> dict:
     p = DATA / "results.json"
-    base = json.loads(p.read_text()) if p.exists() else {}
+    base = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     try:
         base.update(store.extra_results())
     except Exception as exc:  # cloud store down → still serve the batch results
@@ -63,7 +78,7 @@ def _sync():
     p = DATA / "results.json"
     if p.exists() and p.stat().st_mtime != _results_mtime:
         _results_mtime = p.stat().st_mtime
-        fresh = json.loads(p.read_text())
+        fresh = json.loads(p.read_text(encoding="utf-8"))
         for k in [k for k in RESULTS if not k.startswith("new_")]:
             RESULTS.pop(k)
         RESULTS.update(fresh)
@@ -103,7 +118,8 @@ def _row(r: dict) -> dict:
     return {k: r.get(k) for k in ("email_id", "from", "subject", "category", "status", "decided_by",
                                    "review_reason", "defect_fields", "class_confidence")} | \
         {"n_attachments": len(r.get("attachments", [])), "reviewed": bool(r.get("review")),
-         "uploaded": r["email_id"].startswith("new_")}
+         "uploaded": r["email_id"].startswith("new_"), "ai": bool(r.get("ai_used")),
+         "second_opinion": (r.get("second_opinion") or {}).get("agrees")}
 
 
 # ------------------------------------------------------------------ API
@@ -126,24 +142,27 @@ def summary():
                        and not r.get("review"))
     auto = sum(1 for r in eff if r["status"] != "NEEDS_REVIEW" and r.get("decided_by") != "rule_low_confidence")
     by = Counter(r.get("decided_by") for r in eff)
+    ai_touched = sum(1 for r in eff if r.get("ai_used"))
     val = DATA / "validation.json"
     return {"total": len(eff), "categories": cats, "doc_status": stats, "open_reviews": open_reviews,
             "reviewed": len(reviews), "auto_pct": round(100 * auto / max(1, len(eff)), 1),
-            "decided_by": by, "mismatch_fields": Counter(f for r in eff if r["status"] == "MISMATCH" for f in r["defect_fields"]),
-            "validation": json.loads(val.read_text()) if val.exists() else None,
+            "decided_by": by, "ai_touched": ai_touched, "mismatch_fields": Counter(f for r in eff if r["status"] == "MISMATCH" for f in r["defect_fields"]),
+            "validation": json.loads(val.read_text(encoding="utf-8")) if val.exists() else None,
             # rough: 3 min to triage + 10 min per manual SI-vs-BL check
             "minutes_saved": 3 * len(eff) + 10 * (stats.get("OK", 0) + stats.get("MISMATCH", 0))}
 
 
 @app.get("/api/emails")
 def list_emails(category: str | None = None, status: str | None = None, q: str | None = None,
-                queue: bool = False):
+                queue: bool = False, ai: bool = False):
     _sync()
     reviews = _reviews()
     rows = []
     for k, r in RESULTS.items():
         e = _effective(r, reviews.get(k))
         if queue and not ((e["status"] == "NEEDS_REVIEW" or e.get("decided_by") == "rule_low_confidence") and not e.get("review")):
+            continue
+        if ai and not e.get("ai_used"):
             continue
         if category and e["category"] != category:
             continue
@@ -269,12 +288,16 @@ def get_file(path: str):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "emails": len(RESULTS)}
+    return {"ok": not BOOT_PROBLEMS, "emails": len(RESULTS),
+            "problems": BOOT_PROBLEMS or None}
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+if STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 @app.get("/")
 def index():
+    if not (STATIC / "index.html").exists():
+        raise HTTPException(500, "Dashboard files were not deployed. See /health.")
     return FileResponse(STATIC / "index.html")
