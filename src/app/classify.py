@@ -4,6 +4,7 @@ because subjects are often stale ("RE: RE: ...") or misleading.
 """
 from __future__ import annotations
 
+import math
 import re
 
 from . import llm
@@ -104,9 +105,14 @@ def classify(email: dict, use_llm: bool = True) -> dict:
     if use_llm and llm.available():
         out = llm.classify_email(email, CATEGORY_HELP)
         if out and out.get("category") in CATEGORIES:
+            try:
+                confidence = float(out.get("confidence", 0.7))
+                confidence = confidence if math.isfinite(confidence) else 0.7
+            except (TypeError, ValueError):
+                confidence = 0.7
             result.update(category=out["category"], decided_by="llm",
-                          confidence=float(out.get("confidence", 0.7)),
-                          reason=out.get("reason") or "Classified by the AI model.")
+                          confidence=max(0.0, min(1.0, confidence)),
+                          reason=str(out.get("reason") or "Classified by the AI model."))
             return result
     if s1 == 0:
         result.update(category="GENERAL", confidence=0.2)

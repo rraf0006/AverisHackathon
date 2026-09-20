@@ -6,7 +6,9 @@ LLM extractor (llm.py) — so an unseen label on finals day still gets read.
 """
 from __future__ import annotations
 
+import math
 import re
+import unicodedata
 
 FIELDS = ["shipper", "consignee", "notify_party", "port_of_loading",
           "port_of_discharge", "container_count", "gross_weight_kg"]
@@ -79,10 +81,17 @@ def fields_from_pairs(pairs: list[tuple[str, str]]) -> dict[str, dict]:
             if not re.match(r"^[\d.,]+", first) and not is_placeholder(first):
                 continue
             is_total = "total" in label.lower()
-            if f in out and not (is_total and not out[f].get("total")):
+            if f in out:
+                if is_total and not out[f].get("total"):
+                    out[f] = {"label": label.strip(), "value": value, "total": True}
+                elif not out[f].get("total") and normalise(f, out[f]["value"]) != normalise(f, value):
+                    out[f]["conflict"] = True
                 continue
             out[f] = {"label": label.strip(), "value": value, "total": is_total}
-        elif f not in out:
+        elif f in out:
+            if normalise(f, out[f]["value"]) != normalise(f, value):
+                out[f]["conflict"] = True
+        else:
             out[f] = {"label": label.strip(), "value": value}
     for v in out.values():
         v.pop("total", None)
@@ -108,22 +117,38 @@ _SUFFIXES = [
 ]
 
 
+def _fold(value: str) -> str:
+    """Compatibility-normalise text and remove accents without deleting scripts.
+
+    The old A-Z-only cleanup made every Chinese or Arabic company name become an
+    empty string, so two unrelated parties could compare equal.
+    """
+    value = unicodedata.normalize("NFKD", value)
+    return "".join(ch for ch in value if not unicodedata.combining(ch)).upper()
+
+
+def _alnum_words(value: str) -> str:
+    return re.sub(r"\s+", " ", "".join(ch if ch.isalnum() else " " for ch in _fold(value))).strip()
+
+
 def party_name(value: str) -> str:
     """The party's name is its first line; the rest is address."""
-    first = value.strip().splitlines()[0]
+    lines = value.strip().splitlines()
+    if not lines:
+        return ""
+    first = lines[0]
     first = re.split(r"\s+\|\s+", first)[0]
     return first.strip()
 
 
 def norm_party(value: str) -> str:
-    name = party_name(value).upper()
+    name = _fold(party_name(value))
     name = name.replace("&", " AND ")
     for pat, rep in _SUFFIXES:
         name = re.sub(pat, rep, name)
     name = name.replace(".", "")                  # L.L.C. → LLC, PTE. → PTE
     name = name.replace("/", "")                  # A/S → AS (Danish), M/S → MS
-    name = re.sub(r"[^A-Z0-9 ]+", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
+    return _alnum_words(name)
 
 
 _PORT_ALIASES = {"HO CHI MINH": "HOCHIMINH", "HO CHI MINH CITY": "HOCHIMINH", "HOCHIMINH CITY": "HOCHIMINH",
@@ -136,22 +161,71 @@ _PORT_ALIASES = {"HO CHI MINH": "HOCHIMINH", "HO CHI MINH CITY": "HOCHIMINH", "H
 
 
 def norm_port(value: str) -> str:
-    v = value.strip().splitlines()[0].upper()
+    lines = value.strip().splitlines()
+    if not lines:
+        return ""
+    v = _fold(lines[0])
     v = re.sub(r"\([A-Z]{5}\)", "", v)           # UN/LOCODE like (MYPKG)
     v = re.sub(r"\(.*?\)", "", v)                 # terminal names like (WESTPORT)
     city = v.split(",")[0]
-    city = re.sub(r"[^A-Z0-9/ ]+", " ", city)
-    city = re.sub(r"\s+", " ", city).strip()
+    city = _alnum_words(city)
     return _PORT_ALIASES.get(city, city).replace(" ", "")
 
 
+_COUNTRY_ALIASES = {
+    "US": "USA", "UNITED STATES": "USA", "UNITED STATES OF AMERICA": "USA",
+    "UK": "UNITED KINGDOM", "UAE": "UNITED ARAB EMIRATES",
+    "KOREA": "SOUTH KOREA", "REPUBLIC OF KOREA": "SOUTH KOREA",
+}
+
+
+def same_port(a: str, b: str) -> bool:
+    """Compare ports while using country/UNLOCODE evidence when both sides have it.
+
+    A missing country remains compatible with a named country, preserving common
+    forms such as ``BUSAN`` vs ``BUSAN, SOUTH KOREA``. Conflicting explicit
+    countries or location codes are never discarded.
+    """
+    if norm_port(a) != norm_port(b):
+        return False
+
+    def details(value: str) -> tuple[str | None, str | None]:
+        lines = value.strip().splitlines()
+        line = _fold(lines[0]) if lines else ""
+        codes = re.findall(r"\(([A-Z]{5})\)", line)
+        pieces = [p.strip() for p in line.split(",")]
+        country = _alnum_words(re.sub(r"\([A-Z]{5}\)", "", pieces[1])) if len(pieces) > 1 else ""
+        country = _COUNTRY_ALIASES.get(country, country) or None
+        return (codes[-1] if codes else None), country
+
+    a_code, a_country = details(a)
+    b_code, b_country = details(b)
+    if a_code and b_code and a_code != b_code:
+        return False
+    if a_country and b_country and a_country != b_country:
+        return False
+    return True
+
+
 def parse_container_count(value: str) -> int | None:
-    v = str(value).upper()
+    v = unicodedata.normalize("NFKC", str(value)).upper()
+    if re.search(r"\d+\s*[-–—]\s*\d+", v):
+        return None
     parts = re.findall(r"(\d+)\s*[X×*]\s*\d{2}", v)      # 3 x 40'HC, 2X20GP
     if parts:
-        return sum(int(p) for p in parts)
-    m = re.match(r"^\s*(\d+)\b", v)
-    return int(m.group(1)) if m else None
+        result = sum(int(p) for p in parts)
+    else:
+        reverse = re.findall(r"\d{2}\s*(?:'\s*)?(?:GP|HC|HQ|FCL)?\s*[X×*]\s*(\d+)", v)
+        if reverse:
+            result = sum(int(p) for p in reverse)
+        else:
+            m = re.search(r"(?:\((\d+)\)|(\d+))\s+CONTAINERS?\b", v)
+            if not m:
+                m = re.fullmatch(r"\s*(\d+)\s*", v)
+            if not m:
+                return None
+            result = int(next(g for g in m.groups() if g is not None))
+    return result if 1 <= result <= 10_000 else None
 
 
 LB_TO_KG = 0.45359237
@@ -159,22 +233,29 @@ LB_TO_KG = 0.45359237
 
 def parse_weight_kg(value) -> float | None:
     if isinstance(value, (int, float)):
-        return float(value)
-    v = str(value).upper().replace(",", "")
-    # A space can be a thousands separator ("55 200 KG" is European for 55,200).
-    # Without this the regex stops at "55" and reads 55 kg — a 1000x error that
-    # would report a mismatch against an identical weight written differently.
-    v = re.sub(r"(?<=\d)[\s\u00a0](?=\d{3}(?:\D|$))", "", v)
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(KGS?|KILO(?:GRAMS?)?|MT|MTS|TONNES?|TONS?|LBS?|POUNDS?)?", v)
-    if not m:
-        return None
-    num = float(m.group(1))
-    unit = m.group(2) or "KG"
+        num, unit = float(value), "KG"
+    else:
+        v = unicodedata.normalize("NFKC", str(value)).upper()
+        m = re.search(r"([-+]?\d(?:[\d.,\s\u00a0\u202f]*\d)?)\s*"
+                      r"(KGS?|KILO(?:GRAMS?)?|MT|MTS|TONNES?|TONS?|LBS?|POUNDS?)?", v)
+        if not m:
+            return None
+        raw = re.sub(r"[\s\u00a0\u202f]", "", m.group(1))
+        if "," in raw and "." in raw:
+            decimal = "," if raw.rfind(",") > raw.rfind(".") else "."
+            thousands = "." if decimal == "," else ","
+            raw = raw.replace(thousands, "").replace(decimal, ".")
+        elif "," in raw:
+            raw = raw.replace(",", "") if re.fullmatch(r"[-+]?\d{1,3}(?:,\d{3})+", raw) else raw.replace(",", ".")
+        try:
+            num, unit = float(raw), (m.group(2) or "KG")
+        except ValueError:
+            return None
     if unit.startswith(("MT", "TON")):
-        return num * 1000
-    if unit.startswith(("LB", "POUND")):
-        return num * LB_TO_KG
-    return num
+        num *= 1000
+    elif unit.startswith(("LB", "POUND")):
+        num *= LB_TO_KG
+    return num if math.isfinite(num) and 0 < num <= 1_000_000_000 else None
 
 
 def normalise(fname: str, value: str):

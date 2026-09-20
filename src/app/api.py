@@ -5,17 +5,20 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import os
 import re
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import APP_NAME, ROOT, load_env
 
@@ -107,9 +110,27 @@ def _effective(res: dict, review: dict | None) -> dict:
     return out
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return path != root
+    except ValueError:
+        return False
+
+
+def _content_path(path: str) -> tuple[Path, Path]:
+    """Resolve a stored relative path against data or the separate upload root."""
+    rel = Path(path)
+    if not rel.is_absolute() and rel.parts and rel.parts[0].casefold() == "uploads":
+        root = UPLOADS.resolve()
+        return (root.joinpath(*rel.parts[1:]).resolve(), root)
+    root = DATA.resolve()
+    return ((root / rel).resolve(), root)
+
+
 def _read_bytes(path: str) -> bytes:
-    p = (DATA / path).resolve()
-    if not str(p).startswith(str(DATA.resolve())):
+    p, root = _content_path(path)
+    if not _is_within(p, root):
         raise HTTPException(400, "bad path")
     return p.read_bytes()
 
@@ -183,9 +204,9 @@ def get_email(email_id: str):
 
 
 class Review(BaseModel):
-    action: str                     # "confirm" | "correct"
-    category: str | None = None
-    status: str | None = None
+    action: Literal["confirm", "correct"]
+    category: Literal["BL_COMPARISON", "SI_REQUEST", "INVOICE_QUERY", "GENERAL", "SPAM"] | None = None
+    status: Literal["OK", "MISMATCH", "NEEDS_REVIEW", "WAITING_FOR_BL", "NOT_CHECKED"] | None = None
     defect_fields: list[str] | None = None
     note: str | None = None
     reviewer: str | None = None
@@ -246,19 +267,44 @@ class NewEmail(BaseModel):
     sender: str = "demo@example.com"
     subject: str
     body: str = ""
-    files: list[NewFile] = []
+    files: list[NewFile] = Field(default_factory=list)
+
+
+MAX_FILES = 5
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_TOTAL_BYTES = 40 * 1024 * 1024
 
 
 @app.post("/api/process")
 def process_new(body: NewEmail):
     """Process an email typed / uploaded in the dashboard, live."""
-    eid = f"new_{int(time.time() * 1000)}"
+    if len(body.files) > MAX_FILES:
+        raise HTTPException(400, f"At most {MAX_FILES} attachments are allowed.")
+    decoded: list[tuple[str, bytes]] = []
+    seen_names: set[str] = set()
+    total_bytes = 0
+    for f in body.files:
+        safe = re.sub(r"[^\w.\-]+", "_", Path(f.name).name)[:80] or "file"
+        if safe.casefold() in seen_names:
+            raise HTTPException(400, f"Duplicate attachment name after sanitising: {safe}")
+        seen_names.add(safe.casefold())
+        try:
+            raw = base64.b64decode(f.content_b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(400, f"Attachment {safe} is not valid base64.")
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(413, f"Attachment {safe} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB.")
+        total_bytes += len(raw)
+        if total_bytes > MAX_TOTAL_BYTES:
+            raise HTTPException(413, "The combined attachments are too large.")
+        decoded.append((safe, raw))
+
+    eid = f"new_{uuid.uuid4().hex}"
     folder = UPLOADS / eid
     folder.mkdir(parents=True, exist_ok=True)
     paths = []
-    for f in body.files[:5]:
-        safe = re.sub(r"[^\w.\-]+", "_", Path(f.name).name)[:80] or "file"
-        (folder / safe).write_bytes(base64.b64decode(f.content_b64))
+    for safe, raw in decoded:
+        (folder / safe).write_bytes(raw)
         paths.append(f"uploads/{eid}/{safe}")
     email = {"email_id": eid, "from": body.sender, "subject": body.subject, "body": body.body, "attachments": paths}
     res = process_email(email, _read_bytes, use_llm=True)
@@ -279,9 +325,9 @@ def submission():
 
 @app.get("/api/files/{path:path}")
 def get_file(path: str):
-    p = (DATA / path).resolve()
+    p, _ = _content_path(path)
     allowed = [(DATA / "attachments").resolve(), UPLOADS.resolve()]
-    if not any(str(p).startswith(str(a) + "/") for a in allowed) or not p.is_file():
+    if not any(_is_within(p, a) for a in allowed) or not p.is_file():
         raise HTTPException(404, "not found")
     return FileResponse(p)
 

@@ -12,7 +12,7 @@ from typing import Callable
 from . import llm
 from .classify import classify
 from .fields import (FIELD_LABELS, FIELDS, display_value, fields_from_pairs,
-                     is_placeholder, normalise)
+                     is_placeholder, normalise, same_port)
 from .parsing import ParsedDoc, parse_attachment
 
 WRONG_TYPES = {"COMMERCIAL_INVOICE", "PACKING_LIST", "CERTIFICATE_OF_ORIGIN"}
@@ -41,16 +41,22 @@ def _read_doc(path: str, data: bytes, trace: Trace, use_llm: bool) -> tuple[Pars
     fields: dict[str, dict] = {}
     if doc.ok:
         for f, v in fields_from_pairs(doc.pairs).items():
-            fields[f] = {"value": v["value"], "label": v["label"], "quote": f"{v['label']}: {v['value'].splitlines()[0]}",
-                         "source": "rules"}
+            if v.get("conflict"):
+                fields[f] = {"value": None, "label": v["label"],
+                             "quote": f"Conflicting values found for {v['label']}", "source": "rules"}
+            else:
+                fields[f] = {"value": v["value"], "label": v["label"],
+                             "quote": f"{v['label']}: {v['value'].splitlines()[0]}", "source": "rules"}
         trace.add("Read document", "ok", f"{path.split('/')[-1]}: looks like {doc.doc_type}, found {len(fields)}/7 fields by label", t0)
     elif doc.error == "no_text_layer" and use_llm and llm.can_read_pdf():
         out = llm.extract_fields(None, pdf_bytes=data, hint="(scanned — read it visually)")
-        if out and out.get("readable", True):
+        if isinstance(out, dict) and out.get("readable", True) and isinstance(out.get("fields", {}), dict):
             doc.doc_type = out.get("doc_type") or doc.doc_type
             info["ai_read"] = True
             for f in FIELDS:
                 fv = (out.get("fields") or {}).get(f) or {}
+                if not isinstance(fv, dict):
+                    continue
                 if fv.get("value") not in (None, ""):
                     fields[f] = {"value": str(fv["value"]), "label": "(read from scan by AI)",
                                  "quote": fv.get("quote"), "source": "ai-vision"}
@@ -71,12 +77,14 @@ def _fill_with_llm(doc: ParsedDoc, fields: dict, trace: Trace, role: str):
         return
     t0 = time.time()
     out = llm.extract_fields(doc.text, hint=f"(expected: {role})")
-    if not out:
+    if not isinstance(out, dict) or not isinstance(out.get("fields"), dict):
         trace.add("Extract fields (AI)", "warn", f"AI extraction failed for {role}: {llm.last_error or 'no answer'}", t0)
         return
     got = []
     for f in missing:
         fv = (out.get("fields") or {}).get(f) or {}
+        if not isinstance(fv, dict):
+            continue
         if fv.get("value") not in (None, ""):
             fields[f] = {"value": str(fv["value"]), "label": "(matched by AI)", "quote": fv.get("quote"), "source": "ai"}
             got.append(FIELD_LABELS[f])
@@ -113,11 +121,14 @@ def compare_fields(si: dict, bl: dict) -> list[dict]:
             which = "SI" if is_placeholder(s_val) else "BL"
             row["note"] = f"{which} value is missing or a placeholder"
         else:
-            ns, nb = normalise(f, s_val), normalise(f, b_val)
+            if f in ("port_of_loading", "port_of_discharge"):
+                ns, nb = s_val, b_val
+            else:
+                ns, nb = normalise(f, s_val), normalise(f, b_val)
             if ns is None or nb is None:
                 row["note"] = "Could not read the value"
             else:
-                row["match"] = _same_value(f, ns, nb)
+                row["match"] = same_port(ns, nb) if f in ("port_of_loading", "port_of_discharge") else _same_value(f, ns, nb)
                 if row["match"] and display_value(f, s_val).upper() != display_value(f, b_val).upper():
                     row["note"] = "Same value, different formatting"
         rows.append(row)
@@ -178,14 +189,20 @@ def _run(email, read_bytes, use_llm, trace, res, second_opinion=False):
                                  "fields": {k: v["value"] for k, v in fields.items()}})
 
     # ③ Which one is the SI, which is the BL?
-    si = next((d for d in docs if d[0].doc_type == "SI"), None)
-    bl = next((d for d in docs if d[0].doc_type == "BL"), None)
+    sis = [d for d in docs if d[0].doc_type == "SI"]
+    bls = [d for d in docs if d[0].doc_type == "BL"]
+    si = sis[0] if len(sis) == 1 else None
+    bl = bls[0] if len(bls) == 1 else None
     unread = [d for d in docs if not d[0].ok and not d[2]["ai_read"]]
     wrong = [d for d in docs if d[0].doc_type in WRONG_TYPES]
     t0 = time.time()
     if unread:
         names = ", ".join(d[0].path.split("/")[-1] for d in unread)
         _escalate(res, "unreadable", f"Could not read {names}: {unread[0][0].error.replace('_', ' ')}.")
+        trace.add("Escalate", "fail", res["review_detail"], t0)
+        return
+    if len(sis) > 1 or len(bls) > 1:
+        _escalate(res, "wrong_doc_type", "Multiple Shipping Instructions or draft Bills of Lading arrived; a person must choose the correct version.")
         trace.add("Escalate", "fail", res["review_detail"], t0)
         return
     if wrong and bl is None:

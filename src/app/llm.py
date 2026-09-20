@@ -99,12 +99,14 @@ def _parse_json(text: str) -> dict | None:
     text = text.strip()
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
     try:
-        return json.loads(text)
+        out = json.loads(text)
+        return out if isinstance(out, dict) else None
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", text, re.S)
         if m:
             try:
-                return json.loads(m.group(0))
+                out = json.loads(m.group(0))
+                return out if isinstance(out, dict) else None
             except json.JSONDecodeError:
                 return None
     return None
@@ -154,7 +156,12 @@ def ask_json(prompt: str, pdf_bytes: bytes | None = None, retries: int = 3) -> d
     key = f"{prov}|{model}|{prompt}|{hashlib.sha256(pdf_bytes or b'').hexdigest()}"
     cp = _cache_path(key)
     if cp.exists():
-        return json.loads(cp.read_text(encoding="utf-8"))
+        try:
+            cached = json.loads(cp.read_text(encoding="utf-8"))
+            if isinstance(cached, dict):
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
     for attempt in range(retries):
         _throttle()
         try:
@@ -272,10 +279,14 @@ Return JSON: {{"agrees": true|false, "note": "<one short sentence in plain Engli
 --- DRAFT BILL OF LADING ---
 {bl_text[:6000]}"""
     out = ask_json(prompt)
-    if not out or "agrees" not in out:
+    if not out or not isinstance(out.get("agrees"), bool):
         return None
-    return {"agrees": bool(out.get("agrees")), "note": str(out.get("note") or "").strip(),
-            "confidence": float(out.get("confidence") or 0.0), "model": model_name()}
+    try:
+        confidence = float(out.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return {"agrees": out["agrees"], "note": str(out.get("note") or "").strip(),
+            "confidence": max(0.0, min(1.0, confidence)), "model": model_name()}
 
 
 def draft_correction_email(email: dict, mismatches: list[dict]) -> dict | None:
